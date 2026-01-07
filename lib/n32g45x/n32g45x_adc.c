@@ -124,10 +124,17 @@ void ADC_ConfigRegularChannel(ADC_Module* ADCx, uint8_t ADC_Channel, uint8_t Ran
 
     if (ADC_Channel == ADC_CH_18)
     {
-        tmpreg1 = ADCx->SAMPT3;
-        tmpreg1 &= (~0x00000007);
-        tmpreg1 |= ADC_SampleTime;
-        ADCx->SAMPT3 = tmpreg1;
+        // Special handling for temperature sensor channel (CH_18)
+        // Temperature sensor is only available on ADC1
+        if (ADCx == NS_ADC1) {
+            tmpreg1 = ADCx->SAMPT3;
+            tmpreg1 &= (~0x00000007);
+            tmpreg1 |= ADC_SampleTime;
+            ADCx->SAMPT3 = tmpreg1;
+        } else {
+            // Temperature sensor not available on other ADCs
+            return;
+        }
     }
     else if (ADC_Channel > ADC_CH_9) /* if ADC_CH_10 ... ADC_CH_17 is selected */
     {

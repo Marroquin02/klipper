@@ -14,6 +14,9 @@
 #include "sched.h" // sched_shutdown
 #include "n32g45x_adc.h" // ADC
 
+// Watchdog refresh function to prevent system reset during long ADC operations
+static void watchdog_refresh(void);
+
 #define ADC_INVALID_PIN 0xFF
 
 DECL_CONSTANT("ADC_MAX", 4095);
@@ -62,18 +65,42 @@ static const uint8_t adc_pins[] = {
 #endif
 };
 
-// Perform calibration
+// Function to refresh watchdog during long operations
+static void watchdog_refresh(void)
+{
+    extern void watchdog_reset(void);
+    watchdog_reset();
+}
+
+// Perform calibration with timeout protection
 static void
 adc_calibrate(ADC_Module *adc)
 {
+    uint32_t timeout = 1000; // Timeout counter to prevent infinite loops
+    
     adc->CTRL2 = CTRL2_AD_ON_SET;
-    while (!(adc->CTRL3 & ADC_FLAG_RDY))
-        ;
+    while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--) {
+        watchdog_refresh(); // Refresh watchdog while waiting
+    }
+    
+    if (!timeout) {
+        // Timeout occurred, ADC not ready
+        return;
+    }
+    
     adc->CTRL3 &= (~ADC_CTRL3_BPCAL_MSK);
     udelay(10);
     adc->CTRL2 = CTRL2_AD_ON_SET | CTRL2_CAL_SET;
-    while (adc->CTRL2 & CTRL2_CAL_SET)
-        ;
+    
+    timeout = 1000; // Reset timeout for calibration
+    while ((adc->CTRL2 & CTRL2_CAL_SET) && timeout--) {
+        watchdog_refresh(); // Refresh watchdog while waiting
+    }
+    
+    if (!timeout) {
+        // Timeout occurred during calibration
+        return;
+    }
 }
 
 struct gpio_adc
@@ -107,12 +134,14 @@ gpio_adc_setup(uint32_t pin)
                 RCC_AHB_PERIPH_ADC3 | RCC_AHB_PERIPH_ADC4);
     ADC_RCC_AHBPCLKEN = reg_temp;
 
+    // Configure ADC clock properly - first enable ADC PLL clock
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCPLLPRES_RESET_MASK;
     reg_temp |= RCC_ADCPLLCLK_DIV1;
-    reg_temp &= RCC_ADCPLLCLK_DISABLE;
+    // Don't disable the PLL clock, keep it enabled
     ADC_RCC_CFG2 = reg_temp;
 
+    // Configure ADC HCLK prescaler
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCHPRES_RESET_MASK;
     reg_temp |= RCC_ADCHCLK_DIV16;
@@ -130,8 +159,22 @@ gpio_adc_setup(uint32_t pin)
     adc_calibrate(adc);
 
     if (pin == ADC_TEMPERATURE_PIN) {
-        NS_ADC1->CTRL2 |= CTRL2_TSVREFE_SET;
-        VREF1P2_CTRL |= (1<<10);
+        // Only enable temperature sensor on ADC1
+        if (adc == NS_ADC1) {
+            // Wait for ADC to be ready before enabling temperature sensor
+            uint32_t timeout = 1000;
+            while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--)
+                ;
+                
+            if (timeout) {
+                // Enable temperature sensor and VREF
+                NS_ADC1->CTRL2 |= CTRL2_TSVREFE_SET;
+                VREF1P2_CTRL |= (1<<10);
+                
+                // Add small delay after enabling temperature sensor
+                udelay(10);
+            }
+        }
     } else {
         gpio_peripheral(pin, GPIO_ANALOG, 0);
     }
@@ -147,6 +190,10 @@ gpio_adc_sample(struct gpio_adc g)
 {
     ADC_Module *adc = g.adc;
     uint32_t sr = adc->STS;
+    
+    // Refresh watchdog to prevent timeout during ADC operations
+    watchdog_refresh();
+    
     if (sr & ADC_STS_STR) {
         if (!(sr & ADC_STS_ENDC) || adc->RSEQ3 != g.chan)
             // Conversion still in progress or busy on another channel
@@ -168,6 +215,10 @@ uint16_t
 gpio_adc_read(struct gpio_adc g)
 {
     ADC_Module *adc = g.adc;
+    
+    // Refresh watchdog to prevent timeout during ADC operations
+    watchdog_refresh();
+    
     adc->STS &= ~ADC_STS_ENDC;
     adc->STS &= ~ADC_STS_STR;
     adc->CTRL2 &= CTRL2_EXT_TRIG_SWSTART_RESET;

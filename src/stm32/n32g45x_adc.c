@@ -73,35 +73,8 @@ static void watchdog_refresh(void)
 }
 
 // GPIO configuration function specific for N32G455
-static void
-gpio_peripheral_n32g45x(uint32_t gpio, uint32_t mode, int pullup)
-{
-    // N32G455 uses a different GPIO configuration than STM32F1
-    // This function provides the correct configuration for N32G455
-    
-    // Get the GPIO port and pin number
-    uint32_t port = GPIO2PORT(gpio);
-    uint32_t pin = GPIO2BIT(gpio);
-    uint32_t pin_num = gpio % 16;
-    
-    // Enable GPIO clock
-    if (port == 0) {
-        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
-    } else if (port == 1) {
-        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
-    } else if (port == 2) {
-        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
-    }
-    
-    // Configure GPIO for analog mode
-    if (mode == GPIO_ANALOG) {
-        GPIO_TypeDef *regs = gpio_pin_to_regs(gpio);
-        // Set pin to analog mode
-        regs->MODER = (regs->MODER & ~(3 << (pin_num * 2))) | (3 << (pin_num * 2));
-        // No pull-up/pull-down for analog inputs
-        regs->PUPDR &= ~(3 << (pin_num * 2));
-    }
-}
+// Note: This function is not needed as we can use the standard gpio_peripheral() function
+// which is compatible with N32G455
 
 // Perform calibration with timeout protection - improved for N32G455
 static void

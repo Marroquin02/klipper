@@ -80,6 +80,7 @@ class PrinterTemperatureMCU:
             ('stm32l4', self.config_stm32g0),
             ('stm32h723', self.config_stm32h723),
             ('stm32h7', self.config_stm32h7),
+            ('n32g45', self.config_n32g45x),
             ('', self.config_unknown)]
         for name, func in cfg_funcs:
             if self.mcu_type.startswith(name):
@@ -164,6 +165,11 @@ class PrinterTemperatureMCU:
         cal_adc_110 = self.read16(0x1FF1E840) / 65535.
         self.slope = (110. - 30.) / (cal_adc_110 - cal_adc_30)
         self.base_temperature = self.calc_base(30., cal_adc_30)
+    def config_n32g45x(self):
+        # Configuration for N32G45x series microcontrollers
+        # Using similar parameters to STM32F1 but adjusted for N32G45x specifications
+        self.slope = 3.3 / -.004300
+        self.base_temperature = self.calc_base(25., 1.43 / 3.3)
     def read16(self, addr):
         params = self.debug_read_cmd.send([1, addr])
         return params['val']

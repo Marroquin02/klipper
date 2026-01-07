@@ -72,15 +72,46 @@ static void watchdog_refresh(void)
     watchdog_reset();
 }
 
-// Perform calibration with timeout protection
+// GPIO configuration function specific for N32G455
+static void
+gpio_peripheral_n32g45x(uint32_t gpio, uint32_t mode, int pullup)
+{
+    // N32G455 uses a different GPIO configuration than STM32F1
+    // This function provides the correct configuration for N32G455
+    
+    // Get the GPIO port and pin number
+    uint32_t port = GPIO2PORT(gpio);
+    uint32_t pin = GPIO2BIT(gpio);
+    uint32_t pin_num = gpio % 16;
+    
+    // Enable GPIO clock
+    if (port == 0) {
+        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOAEN;
+    } else if (port == 1) {
+        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOBEN;
+    } else if (port == 2) {
+        RCC->AHB1ENR |= RCC_AHB1ENR_GPIOCEN;
+    }
+    
+    // Configure GPIO for analog mode
+    if (mode == GPIO_ANALOG) {
+        GPIO_TypeDef *regs = gpio_pin_to_regs(gpio);
+        // Set pin to analog mode
+        regs->MODER = (regs->MODER & ~(3 << (pin_num * 2))) | (3 << (pin_num * 2));
+        // No pull-up/pull-down for analog inputs
+        regs->PUPDR &= ~(3 << (pin_num * 2));
+    }
+}
+
+// Perform calibration with timeout protection - improved for N32G455
 static void
 adc_calibrate(ADC_Module *adc)
 {
-    uint32_t timeout = 5000; // Increased timeout for better reliability
+    uint32_t timeout = 10000; // Increased timeout for better reliability
     
     // Ensure ADC is completely off before calibration
     adc->CTRL2 &= ~CTRL2_AD_ON_SET;
-    udelay(10);
+    udelay(20); // Increased delay
     
     // Turn on ADC and wait for ready flag
     adc->CTRL2 = CTRL2_AD_ON_SET;
@@ -96,12 +127,12 @@ adc_calibrate(ADC_Module *adc)
     
     // Disable calibration during power-up
     adc->CTRL3 &= (~ADC_CTRL3_BPCAL_MSK);
-    udelay(20); // Increased delay for stabilization
+    udelay(50); // Increased delay for stabilization
     
-    // Start calibration
+    // Start calibration with proper sequence for N32G455
     adc->CTRL2 = CTRL2_AD_ON_SET | CTRL2_CAL_SET;
     
-    timeout = 5000; // Increased timeout for calibration
+    timeout = 10000; // Increased timeout for calibration
     while ((adc->CTRL2 & CTRL2_CAL_SET) && timeout--) {
         watchdog_refresh(); // Refresh watchdog while waiting
         udelay(1);
@@ -113,7 +144,7 @@ adc_calibrate(ADC_Module *adc)
     }
     
     // Additional delay after calibration to ensure stability
-    udelay(50);
+    udelay(100);
 }
 
 struct gpio_adc
@@ -150,14 +181,14 @@ gpio_adc_setup(uint32_t pin)
     // Configure ADC clock properly - first enable ADC PLL clock
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCPLLPRES_RESET_MASK;
-    reg_temp |= RCC_ADCPLLCLK_DIV2; // Changed from DIV1 to DIV2 for better timing
+    reg_temp |= RCC_ADCPLLCLK_DIV2; // Use DIV2 for proper timing
     // Don't disable the PLL clock, keep it enabled
     ADC_RCC_CFG2 = reg_temp;
 
-    // Configure ADC HCLK prescaler
+    // Configure ADC HCLK prescaler - corrected for N32G455
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCHPRES_RESET_MASK;
-    reg_temp |= RCC_ADCHCLK_DIV4; // Changed from DIV16 to DIV4 for faster conversion
+    reg_temp |= RCC_ADCHCLK_DIV2; // Changed from DIV4 to DIV2 for N32G455 specific timing
     ADC_RCC_CFG2 = reg_temp;
 
     ADC_InitType ADC_InitStructure;
@@ -182,13 +213,15 @@ gpio_adc_setup(uint32_t pin)
             }
                 
             if (timeout) {
-                // Enable temperature sensor and VREF
+                // Enable temperature sensor only - VREF configuration removed
+                // The sensor of temperature is connected to ADC1_IN16, not to VREF
                 NS_ADC1->CTRL2 |= CTRL2_TSVREFE_SET;
-                VREF1P2_CTRL |= (1<<10);
+                // Removed: VREF1P2_CTRL |= (1<<10);
+                // This bit controls the VREF buffer, not the temperature sensor
                 
-                // Significantly increased delay after enabling temperature sensor
-                // Changed from 100us to 1000us to ensure proper stabilization
-                udelay(1000);
+                // Increased delay after enabling temperature sensor
+                // Changed from 1000us to 2000us to ensure proper stabilization
+                udelay(2000);
                 
                 // Verify temperature sensor is properly enabled
                 timeout = 1000;
@@ -210,7 +243,7 @@ gpio_adc_setup(uint32_t pin)
 
 // Try to sample a value. Returns zero if sample ready, otherwise
 // returns the number of clock ticks the caller should wait before
-// retrying this function.
+// retrying this function - improved for N32G455
 uint32_t
 gpio_adc_sample(struct gpio_adc g)
 {
@@ -220,11 +253,14 @@ gpio_adc_sample(struct gpio_adc g)
     // Refresh watchdog to prevent timeout during ADC operations
     watchdog_refresh();
     
-    // Debug logging for temperature sensor
+    // Special handling for temperature sensor (channel 18)
     if (g.chan == 18) {
-        // Temperature sensor channel debugging
-        // Note: This would require debug output infrastructure to be useful
-        // For now, we'll ensure proper timing for temperature sensor
+        // Temperature sensor requires longer sampling time for accuracy
+        // Use maximum sampling time for temperature sensor
+        ADC_ConfigRegularChannel(adc, g.chan, 1, ADC_SAMP_TIME_239CYCLES5);
+    } else {
+        // Use standard sampling time for regular channels
+        ADC_ConfigRegularChannel(adc, g.chan, 1, ADC_SAMP_TIME_41CYCLES5);
     }
     
     if (sr & ADC_STS_STR) {
@@ -234,21 +270,23 @@ gpio_adc_sample(struct gpio_adc g)
         // Conversion ready
         return 0;
     }
+    
     // ADC timing: clock=4Mhz, Tconv=12.5, Tsamp=41.5, total=13.500us
-    ADC_ConfigRegularChannel(adc, g.chan, 1, ADC_SAMP_TIME_41CYCLES5);
+    // For temperature sensor: Tsamp=239.5, total=252.000us
     adc->CTRL2 |= CTRL2_AD_ON_SET;
     adc->CTRL2 |= CTRL2_EXT_TRIG_SWSTART_SET;
 
 need_delay:
-    return timer_from_us(20);
+    // Use longer delay for temperature sensor to ensure proper conversion
+    return timer_from_us(g.chan == 18 ? 300 : 20);
 }
 
-// Read a value; use only after gpio_adc_sample() returns zero
+// Read a value; use only after gpio_adc_sample() returns zero - improved for N32G455
 uint16_t
 gpio_adc_read(struct gpio_adc g)
 {
     ADC_Module *adc = g.adc;
-    uint32_t timeout = 1000;
+    uint32_t timeout = 2000; // Increased timeout for N32G455
     
     // Refresh watchdog to prevent timeout during ADC operations
     watchdog_refresh();
@@ -272,19 +310,33 @@ gpio_adc_read(struct gpio_adc g)
     adc->STS &= ~ADC_STS_STR;
     adc->CTRL2 &= CTRL2_EXT_TRIG_SWSTART_RESET;
     
-    // Additional verification for temperature sensor
+    // Enhanced verification for temperature sensor (channel 18)
     if (g.chan == 18) {
         // Temperature sensor channel verification
-        // If result is zero, it might indicate a problem with the sensor
-        if (result == 0) {
-            // Try to re-read once more
-            timeout = 500;
+        // If result is zero or too low, it might indicate a problem with the sensor
+        if (result < 100) { // Threshold for minimum expected temperature reading
+            // Try to re-read once more with longer delay
+            udelay(100); // Allow more time for stabilization
+            timeout = 1000;
             while (!(adc->STS & ADC_STS_ENDC) && timeout--) {
                 watchdog_refresh();
                 udelay(1);
             }
             if (timeout) {
                 result = adc->DAT;
+            }
+            
+            // If still too low, try a third time with even longer delay
+            if (result < 100) {
+                udelay(200);
+                timeout = 1000;
+                while (!(adc->STS & ADC_STS_ENDC) && timeout--) {
+                    watchdog_refresh();
+                    udelay(1);
+                }
+                if (timeout) {
+                    result = adc->DAT;
+                }
             }
         }
     }

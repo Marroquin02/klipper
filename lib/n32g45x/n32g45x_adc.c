@@ -128,13 +128,17 @@ void ADC_ConfigRegularChannel(ADC_Module* ADCx, uint8_t ADC_Channel, uint8_t Ran
         // Temperature sensor is only available on ADC1
         if (ADCx == NS_ADC1) {
             // Configure sample time for temperature sensor
-            // Use longer sample time for temperature sensor to ensure accuracy
+            // Use maximum sample time for temperature sensor to ensure accuracy
             tmpreg1 = ADCx->SAMPT3;
             tmpreg1 &= (~0x00000007);
             // Use maximum sample time for temperature sensor (239.5 cycles)
             // This ensures more accurate temperature readings
             tmpreg1 |= ADC_SAMP_TIME_239CYCLES5;
             ADCx->SAMPT3 = tmpreg1;
+            
+            // Additional configuration for N32G455 temperature sensor
+            // Ensure proper internal reference is enabled
+            ADCx->CTRL2 |= CTRL2_TSVREFE_SET;
         } else {
             // Temperature sensor not available on other ADCs
             return;

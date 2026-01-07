@@ -76,11 +76,17 @@ static void watchdog_refresh(void)
 static void
 adc_calibrate(ADC_Module *adc)
 {
-    uint32_t timeout = 1000; // Timeout counter to prevent infinite loops
+    uint32_t timeout = 5000; // Increased timeout for better reliability
     
+    // Ensure ADC is completely off before calibration
+    adc->CTRL2 &= ~CTRL2_AD_ON_SET;
+    udelay(10);
+    
+    // Turn on ADC and wait for ready flag
     adc->CTRL2 = CTRL2_AD_ON_SET;
     while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--) {
         watchdog_refresh(); // Refresh watchdog while waiting
+        udelay(1);
     }
     
     if (!timeout) {
@@ -88,19 +94,26 @@ adc_calibrate(ADC_Module *adc)
         return;
     }
     
+    // Disable calibration during power-up
     adc->CTRL3 &= (~ADC_CTRL3_BPCAL_MSK);
-    udelay(10);
+    udelay(20); // Increased delay for stabilization
+    
+    // Start calibration
     adc->CTRL2 = CTRL2_AD_ON_SET | CTRL2_CAL_SET;
     
-    timeout = 1000; // Reset timeout for calibration
+    timeout = 5000; // Increased timeout for calibration
     while ((adc->CTRL2 & CTRL2_CAL_SET) && timeout--) {
         watchdog_refresh(); // Refresh watchdog while waiting
+        udelay(1);
     }
     
     if (!timeout) {
         // Timeout occurred during calibration
         return;
     }
+    
+    // Additional delay after calibration to ensure stability
+    udelay(50);
 }
 
 struct gpio_adc
@@ -137,14 +150,14 @@ gpio_adc_setup(uint32_t pin)
     // Configure ADC clock properly - first enable ADC PLL clock
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCPLLPRES_RESET_MASK;
-    reg_temp |= RCC_ADCPLLCLK_DIV1;
+    reg_temp |= RCC_ADCPLLCLK_DIV2; // Changed from DIV1 to DIV2 for better timing
     // Don't disable the PLL clock, keep it enabled
     ADC_RCC_CFG2 = reg_temp;
 
     // Configure ADC HCLK prescaler
     reg_temp = ADC_RCC_CFG2;
     reg_temp &= CFG2_ADCHPRES_RESET_MASK;
-    reg_temp |= RCC_ADCHCLK_DIV16;
+    reg_temp |= RCC_ADCHCLK_DIV4; // Changed from DIV16 to DIV4 for faster conversion
     ADC_RCC_CFG2 = reg_temp;
 
     ADC_InitType ADC_InitStructure;
@@ -162,22 +175,34 @@ gpio_adc_setup(uint32_t pin)
         // Only enable temperature sensor on ADC1
         if (adc == NS_ADC1) {
             // Wait for ADC to be ready before enabling temperature sensor
-            uint32_t timeout = 1000;
-            while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--)
-                ;
+            uint32_t timeout = 5000;
+            while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--) {
+                watchdog_refresh();
+                udelay(1);
+            }
                 
             if (timeout) {
                 // Enable temperature sensor and VREF
                 NS_ADC1->CTRL2 |= CTRL2_TSVREFE_SET;
                 VREF1P2_CTRL |= (1<<10);
                 
-                // Add longer delay after enabling temperature sensor
-                // Increased from 10us to 100us to ensure proper stabilization
-                udelay(100);
+                // Significantly increased delay after enabling temperature sensor
+                // Changed from 100us to 1000us to ensure proper stabilization
+                udelay(1000);
+                
+                // Verify temperature sensor is properly enabled
+                timeout = 1000;
+                while (!(adc->CTRL3 & ADC_FLAG_RDY) && timeout--) {
+                    watchdog_refresh();
+                    udelay(1);
+                }
             }
         }
     } else {
+        // Ensure GPIO is properly configured for analog input
         gpio_peripheral(pin, GPIO_ANALOG, 0);
+        // Add small delay to ensure GPIO configuration is applied
+        udelay(10);
     }
 
     return (struct gpio_adc){ .adc = adc, .chan = chan };
@@ -223,21 +248,45 @@ uint16_t
 gpio_adc_read(struct gpio_adc g)
 {
     ADC_Module *adc = g.adc;
+    uint32_t timeout = 1000;
     
     // Refresh watchdog to prevent timeout during ADC operations
     watchdog_refresh();
     
+    // Wait for conversion to complete with timeout
+    while (!(adc->STS & ADC_STS_ENDC) && timeout--) {
+        watchdog_refresh();
+        udelay(1);
+    }
+    
+    if (!timeout) {
+        // Timeout occurred, return zero to indicate error
+        return 0;
+    }
+    
+    // Read the result BEFORE clearing flags (critical fix)
+    uint16_t result = adc->DAT;
+    
+    // Now clear the status flags
     adc->STS &= ~ADC_STS_ENDC;
     adc->STS &= ~ADC_STS_STR;
     adc->CTRL2 &= CTRL2_EXT_TRIG_SWSTART_RESET;
-    uint16_t result = adc->DAT;
     
-    // Debug logging for temperature sensor
+    // Additional verification for temperature sensor
     if (g.chan == 18) {
-        // Temperature sensor channel debugging
-        // Check if result is zero or out of expected range
-        // Note: This would require debug output infrastructure to be useful
-        // For now, we'll ensure proper handling of temperature sensor readings
+        // Temperature sensor channel verification
+        // If result is zero, it might indicate a problem with the sensor
+        if (result == 0) {
+            // Try to re-read once more
+            timeout = 500;
+            while (!(adc->STS & ADC_STS_ENDC) && timeout--) {
+                watchdog_refresh();
+                udelay(1);
+            }
+            if (timeout) {
+                result = adc->DAT;
+            }
+        }
     }
     
     return result;
